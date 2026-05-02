@@ -4,3 +4,5 @@ __pycache__/
 *.dta
 .DS_Store
 .streamlit/secrets.toml
+seed_supabase.py
+backfill_questions.py

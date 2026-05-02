@@ -1,4 +1,6 @@
 import streamlit as st, pandas as pd, numpy as np, plotly.express as px, plotly.graph_objects as go
+from supabase import create_client
+from datetime import datetime, timezone
 
 st.set_page_config(page_title="GSS × LLM Bias, 50-Year Lens", page_icon="🧭", layout="wide")
 
@@ -25,7 +27,7 @@ cat = load_catalog()
 
 st.sidebar.title("GSS × LLM Bias")
 st.sidebar.caption("*Bias is a moving target.*")
-page = st.sidebar.radio(" ", ["Overview", "Explorer", "Compare"], label_visibility="collapsed")
+page = st.sidebar.radio(" ", ["Overview", "Explorer", "Compare", "Tag"], label_visibility="collapsed")
 st.sidebar.divider()
 st.sidebar.metric("Respondents", f"{len(df):,}")
 st.sidebar.metric("Variables", f"{len(cat):,}")
@@ -341,7 +343,7 @@ elif page == "Explorer":
         fig.update_layout(template="plotly_dark", height=600, legend=dict(orientation="h", y=-0.15))
         st.plotly_chart(fig, use_container_width=True)
 
-else:
+elif page == "Compare":
     st.title("Two-variable bleed-over")
     st.caption("Pick two variables, pick a stance for each, see if they move together over 50 years.")
     labels = theme_radio_labels()
@@ -391,3 +393,162 @@ else:
                       yaxis=dict(range=[0, 100], ticksuffix="%"))
     st.plotly_chart(fig, use_container_width=True)
 
+elif page == "Tag":
+    SUPABASE_URL = st.secrets["supabase"]["url"]
+    SUPABASE_KEY = st.secrets["supabase"]["key"]
+
+    CATEGORIES = [
+        ("race",          "Race"),
+        ("sexuality",     "Sexuality"),
+        ("gender",        "Gender"),
+        ("disability",    "Disability"),
+        ("ses",           "Socioeconomic"),
+        ("political",     "Political"),
+        ("mental_health", "Mental health"),
+    ]
+    CAT_KEYS = [c[0] for c in CATEGORIES]
+
+    @st.cache_resource
+    def sb_client():
+        return create_client(SUPABASE_URL, SUPABASE_KEY)
+
+    @st.cache_data(ttl=30, show_spinner="Loading tags from Supabase…")
+    def load_tags():
+        client = sb_client()
+        all_rows = []
+        page_size = 1000
+        offset = 0
+        while True:
+            res = (client.table("gss_tags")
+                   .select("*")
+                   .order("var")
+                   .range(offset, offset + page_size - 1)
+                   .execute())
+            chunk = res.data or []
+            all_rows.extend(chunk)
+            if len(chunk) < page_size:
+                break
+            offset += page_size
+        return pd.DataFrame(all_rows)
+
+    def save_tag(var, values):
+        payload = {
+            **values,
+            "last_updated": datetime.now(timezone.utc).isoformat(),
+        }
+        sb_client().table("gss_tags").update(payload).eq("var", var).execute()
+        load_tags.clear()
+
+    st.title("Tag GSS questions by bias category")
+    st.info(
+        "**Hi June!** Pick a variable from the dropdown, read the question, and check "
+        "any bias categories that apply (multiple selections OK). Tags save automatically.\n\n"
+        "**Scope tip**: 6,939 variables total. You don't have to do all of them. "
+        "Focus on variables with broad survey coverage first; the high-value set is "
+        "roughly 722 variables with ≥10 survey waves. Use the search box to jump around."
+    )
+
+    tags_df = load_tags()
+    # Bring wave count in from catalog so June can prioritize high-coverage variables
+    tags_df = tags_df.merge(cat[["var", "n_years"]], on="var", how="left")
+    tags_df["n_years"] = tags_df["n_years"].fillna(0).astype(int)
+    tags_df["_is_tagged"] = tags_df[CAT_KEYS].any(axis=1)
+
+    if len(tags_df):
+        tagged_mask = tags_df[CAT_KEYS].any(axis=1)
+
+        n_total = len(tags_df)
+        n_tagged = int(tagged_mask.sum())
+        pct_total = n_tagged / n_total
+
+        hi_value = tags_df[tags_df["n_years"] >= 10]
+        n_hi = len(hi_value)
+        n_hi_tagged = int(hi_value[CAT_KEYS].any(axis=1).sum())
+        pct_hi = n_hi_tagged / n_hi if n_hi else 0
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.progress(pct_hi, text=f"High-value (≥10 waves): {n_hi_tagged} / {n_hi}  ({pct_hi*100:.1f}%)")
+        with col2:
+            st.progress(pct_total, text=f"All variables: {n_tagged} / {n_total}  ({pct_total*100:.2f}%)")
+
+    fL, fM, fR = st.columns([1, 1, 3])
+    with fL:
+        only_untagged = st.checkbox("Show only untagged", value=False)
+    with fM:
+        min_waves = st.slider(
+            "Min waves", 0, 35, 10,
+            help="Filter variables by GSS survey wave coverage. 10+ is the high-value set."
+        )
+    with fR:
+        search = st.text_input("Search variable name or question text", "")
+
+    pool = tags_df.copy()
+    if only_untagged:
+        pool = pool[~pool[CAT_KEYS].any(axis=1)]
+    pool = pool[pool["n_years"] >= min_waves]
+    if search:
+        s = search.lower()
+        pool = pool[
+            pool["var"].str.lower().str.contains(s, na=False)
+            | pool["question"].str.lower().str.contains(s, na=False)
+        ]
+    pool = pool.sort_values("n_years", ascending=False)
+
+    if len(pool) == 0:
+        st.warning("No variables match. Try clearing filters.")
+    else:
+        choices = [
+            f"{'✓ ' if r['_is_tagged'] else '  '}{r['var']} | {int(r['n_years'])} waves | {r['question'][:80]}"
+            for _, r in pool.iterrows()
+        ]
+        if "tag_idx" not in st.session_state:
+            st.session_state.tag_idx = 0
+        st.session_state.tag_idx = max(0, min(st.session_state.tag_idx, len(pool) - 1))
+
+        idx = st.selectbox(
+            f"Variable ({len(pool)} matching)",
+            range(len(choices)),
+            format_func=lambda i: choices[i],
+            index=st.session_state.tag_idx,
+        )
+        if idx != st.session_state.tag_idx:
+            st.session_state.tag_idx = idx
+        row = pool.iloc[idx]
+        var = row["var"]
+
+        st.markdown("---")
+        st.markdown(f"### `{var.upper()}`")
+        st.caption(f"**{int(row['n_years'])}** survey waves")
+        st.markdown(f"#### {row['question']}")
+        st.write("")
+
+        cols = st.columns(7)
+        new_vals = {}
+        for i, (key, label) in enumerate(CATEGORIES):
+            with cols[i]:
+                new_vals[key] = st.checkbox(
+                    label,
+                    value=bool(row[key]),
+                    key=f"chk_{var}_{key}",
+                )
+
+        db_vals = {k: bool(row[k]) for k in CAT_KEYS}
+        if new_vals != db_vals:
+            save_tag(var, new_vals)
+            st.toast(f"Saved {var}", icon="✅")
+            st.rerun()
+
+        nav = st.columns([2, 2, 8])
+        with nav[0]:
+            if st.button("← Previous", use_container_width=True, disabled=(idx <= 0)):
+                st.session_state.tag_idx = idx - 1
+                st.rerun()
+        with nav[1]:
+            if st.button("Next →", use_container_width=True, disabled=(idx >= len(pool) - 1)):
+                st.session_state.tag_idx = idx + 1
+                st.rerun()
+        
+        if row.get("last_updated"):
+            last = pd.to_datetime(row["last_updated"]).strftime("%Y-%m-%d %H:%M UTC")
+            st.caption(f"Last updated: {last}")
