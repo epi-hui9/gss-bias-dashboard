@@ -511,10 +511,19 @@ elif page == "Tag":
                 "Use the filters above to narrow the list, then select multiple questions here and add one or more categories to them."
             )
 
+            if "batch_success_message" in st.session_state:
+                st.success(st.session_state["batch_success_message"])
+                del st.session_state["batch_success_message"]
+            
+            if "batch_widget_version" not in st.session_state:
+                st.session_state["batch_widget_version"] = 0
+
+            batch_widget_version = st.session_state["batch_widget_version"]
+
             batch_search = st.text_input(
                 "Search within visible questions",
                 "",
-                key="batch_search",
+                key=f"batch_search_{batch_widget_version}",
                 help="Narrow the batch list without changing the single-question view below.",
             )
 
@@ -527,18 +536,55 @@ elif page == "Tag":
                 ]
 
             batch_options = batch_options.sort_values("n_years", ascending=False)
-            batch_options["batch_label"] = batch_options.apply(
-                lambda r: f"{r['var']} | {int(r['n_years'])} waves | {str(r['question'])[:120]}",
-                axis=1,
-            )
+
+            tag_colors = {
+                "Race": "#7c3aed",
+                "Sexuality": "#db2777",
+                "Gender": "#2563eb",
+                "Disability": "#059669",
+                "Socioeconomic": "#d97706",
+                "Political": "#dc2626",
+                "Mental health": "#0891b2",
+            }
+
+            def tag_pills(row):
+                existing_tags = [label for key, label in CATEGORIES if bool(row[key])]
+                return " ".join(
+                    [
+                        f"<span style='background:{tag_colors.get(tag, '#374151')}; color:white; padding:2px 8px; border-radius:999px; font-size:12px; margin-right:4px;'>{tag}</span>"
+                        for tag in existing_tags
+                    ]
+                )
+
+            already_tagged = batch_options[batch_options[CAT_KEYS].any(axis=1)].copy()
+            batch_options = batch_options[~batch_options[CAT_KEYS].any(axis=1)].copy()
+
+            if len(already_tagged):
+                with st.expander(f"Already tagged in this search ({len(already_tagged)})"):
+                    for _, tr in already_tagged.head(25).iterrows():
+                        st.markdown(
+                            f"**`{tr['var']}`** · {int(tr['n_years'])} waves<br>{tag_pills(tr)}",
+                            unsafe_allow_html=True,
+                        )
+                        st.caption(str(tr["question"]))
+                    if len(already_tagged) > 25:
+                        st.caption(f"Showing first 25 of {len(already_tagged)} already tagged questions.")
+
+            batch_labels = []
+            for _, r in batch_options.iterrows():
+                batch_labels.append(
+                    f"{r['var']} | {int(r['n_years'])} waves | {str(r['question'])[:120]}"
+                )
+            batch_options["batch_label"] = batch_labels
+
             batch_label_map = dict(zip(batch_options["var"], batch_options["batch_label"]))
 
             selected_vars = st.multiselect(
                 "Questions to update",
                 batch_options["var"].tolist(),
                 format_func=lambda v: batch_label_map.get(v, v),
-                key="batch_selected_vars",
-                help="Search first, then select multiple questions from the narrowed list.",
+                key=f"batch_selected_vars_{batch_widget_version}",
+                help="Only untagged questions are shown here. Already tagged questions appear in the section above.",
             )
 
             if selected_vars:
@@ -547,8 +593,34 @@ elif page == "Tag":
                 selected_preview = selected_preview.sort_values("order")
 
                 st.write("Selected questions")
+
+                tag_colors = {
+                    "Race": "#7c3aed",
+                    "Sexuality": "#db2777",
+                    "Gender": "#2563eb",
+                    "Disability": "#059669",
+                    "Socioeconomic": "#d97706",
+                    "Political": "#dc2626",
+                    "Mental health": "#0891b2",
+                }
+
                 for _, sr in selected_preview.iterrows():
-                    st.markdown(f"**`{sr['var']}`** · {int(sr['n_years'])} waves")
+                    existing_tags = [label for key, label in CATEGORIES if bool(sr[key])]
+                    tag_html = " ".join(
+                        [
+                            f"<span style='background:{tag_colors.get(tag, '#374151')}; color:white; padding:2px 8px; border-radius:999px; font-size:12px; margin-right:4px;'>{tag}</span>"
+                            for tag in existing_tags
+                        ]
+                    )
+
+                    if tag_html:
+                        st.markdown(
+                            f"**`{sr['var']}`** · {int(sr['n_years'])} waves<br>{tag_html}",
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.markdown(f"**`{sr['var']}`** · {int(sr['n_years'])} waves")
+
                     st.caption(str(sr["question"]))
 
             st.write("Categories to add")
@@ -556,7 +628,7 @@ elif page == "Tag":
             batch_vals = {}
             for i, (key, label) in enumerate(CATEGORIES):
                 with batch_cols[i]:
-                    batch_vals[key] = st.checkbox(label, key=f"batch_{key}")
+                    batch_vals[key] = st.checkbox(label, key=f"batch_{key}_{batch_widget_version}")
 
             selected_categories = {k: True for k, v in batch_vals.items() if v}
 
@@ -566,8 +638,17 @@ elif page == "Tag":
                 disabled=(not selected_vars or not selected_categories),
             ):
                 save_tags_batch(selected_vars, selected_categories)
-                st.toast(f"Updated {len(selected_vars)} questions", icon="✅")
+                st.session_state["batch_success_message"] = f"Updated {len(selected_vars)} questions"
+                st.session_state["batch_widget_version"] += 1
+                for k in ["batch_search", "batch_selected_vars"]:
+                    if k in st.session_state:
+                        del st.session_state[k]
+                for key, _ in CATEGORIES:
+                    checkbox_key = f"batch_{key}"
+                    if checkbox_key in st.session_state:
+                        del st.session_state[checkbox_key]
                 st.rerun()
+
         choices = [
             f"{'✓ ' if r['_is_tagged'] else '  '}{r['var']} | {int(r['n_years'])} waves | {r['question'][:80]}"
             for _, r in pool.iterrows()
