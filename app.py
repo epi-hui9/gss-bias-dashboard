@@ -438,6 +438,14 @@ elif page == "Tag":
         }
         sb_client().table("gss_tags").update(payload).eq("var", var).execute()
         load_tags.clear()
+    
+    def save_tags_batch(vars_to_update, values):
+        payload = {
+            **values,
+            "last_updated": datetime.now(timezone.utc).isoformat(),
+        }
+        sb_client().table("gss_tags").update(payload).in_("var", vars_to_update).execute()
+        load_tags.clear()
 
     st.title("Tag GSS questions by bias category")
     st.info(
@@ -498,6 +506,68 @@ elif page == "Tag":
     if len(pool) == 0:
         st.warning("No variables match. Try clearing filters.")
     else:
+        with st.expander("Batch tag visible questions"):
+            st.caption(
+                "Use the filters above to narrow the list, then select multiple questions here and add one or more categories to them."
+            )
+
+            batch_search = st.text_input(
+                "Search within visible questions",
+                "",
+                key="batch_search",
+                help="Narrow the batch list without changing the single-question view below.",
+            )
+
+            batch_options = pool.copy()
+            if batch_search:
+                bs = batch_search.lower()
+                batch_options = batch_options[
+                    batch_options["var"].str.lower().str.contains(bs, na=False)
+                    | batch_options["question"].str.lower().str.contains(bs, na=False)
+                ]
+
+            batch_options = batch_options.sort_values("n_years", ascending=False)
+            batch_options["batch_label"] = batch_options.apply(
+                lambda r: f"{r['var']} | {int(r['n_years'])} waves | {str(r['question'])[:120]}",
+                axis=1,
+            )
+            batch_label_map = dict(zip(batch_options["var"], batch_options["batch_label"]))
+
+            selected_vars = st.multiselect(
+                "Questions to update",
+                batch_options["var"].tolist(),
+                format_func=lambda v: batch_label_map.get(v, v),
+                key="batch_selected_vars",
+                help="Search first, then select multiple questions from the narrowed list.",
+            )
+
+            if selected_vars:
+                selected_preview = tags_df[tags_df["var"].isin(selected_vars)].copy()
+                selected_preview["order"] = selected_preview["var"].apply(lambda v: selected_vars.index(v))
+                selected_preview = selected_preview.sort_values("order")
+
+                st.write("Selected questions")
+                for _, sr in selected_preview.iterrows():
+                    st.markdown(f"**`{sr['var']}`** · {int(sr['n_years'])} waves")
+                    st.caption(str(sr["question"]))
+
+            st.write("Categories to add")
+            batch_cols = st.columns(7)
+            batch_vals = {}
+            for i, (key, label) in enumerate(CATEGORIES):
+                with batch_cols[i]:
+                    batch_vals[key] = st.checkbox(label, key=f"batch_{key}")
+
+            selected_categories = {k: True for k, v in batch_vals.items() if v}
+
+            if st.button(
+                "Add selected categories",
+                use_container_width=True,
+                disabled=(not selected_vars or not selected_categories),
+            ):
+                save_tags_batch(selected_vars, selected_categories)
+                st.toast(f"Updated {len(selected_vars)} questions", icon="✅")
+                st.rerun()
         choices = [
             f"{'✓ ' if r['_is_tagged'] else '  '}{r['var']} | {int(r['n_years'])} waves | {r['question'][:80]}"
             for _, r in pool.iterrows()
