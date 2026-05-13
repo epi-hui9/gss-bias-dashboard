@@ -405,6 +405,7 @@ elif page == "Tag":
         ("ses",           "Socioeconomic"),
         ("political",     "Political"),
         ("mental_health", "Mental health"),
+        ("religion",      "Religion"),
     ]
     CAT_KEYS = [c[0] for c in CATEGORIES]
 
@@ -624,7 +625,7 @@ elif page == "Tag":
                     st.caption(str(sr["question"]))
 
             st.write("Categories to add")
-            batch_cols = st.columns(7)
+            batch_cols = st.columns(len(CATEGORIES))
             batch_vals = {}
             for i, (key, label) in enumerate(CATEGORIES):
                 with batch_cols[i]:
@@ -674,7 +675,7 @@ elif page == "Tag":
         st.markdown(f"#### {row['question']}")
         st.write("")
 
-        cols = st.columns(7)
+        cols = st.columns(len(CATEGORIES))
         new_vals = {}
         for i, (key, label) in enumerate(CATEGORIES):
             with cols[i]:
